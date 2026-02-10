@@ -16,6 +16,16 @@ export interface ScriptState {
   [TeachingStage.Lab]: string;
 }
 
+export interface HistoryItem {
+  id: string;
+  content: string;
+  timestamp: number;
+  type: 'generate' | 'modify';
+  summary?: string;
+}
+
+export type ScriptHistory = Record<TeachingStage, HistoryItem[]>;
+
 export interface ReviewIssue {
   id?: string;
   quote?: string;

@@ -1,6 +1,8 @@
 import React, { useState } from "react";
-import { STAGES, INITIAL_SCRIPTS, PLACEHOLDERS } from "./constants";
-import { TeachingStage, ScriptState, ReviewState, ReviewIssue } from "./types";
+// @ts-ignore
+import html2pdf from "html2pdf.js";
+import { STAGES, INITIAL_SCRIPTS, PLACEHOLDERS, INITIAL_HISTORY } from "./constants";
+import { TeachingStage, ScriptState, ReviewState, ReviewIssue, ScriptHistory, HistoryItem } from "./types";
 import { generateScriptForStage, modifyScript, reviewScript } from "./services/geminiService";
 import { Spinner } from "./components/Spinner";
 
@@ -10,14 +12,31 @@ const App: React.FC = () => {
   const [experiments, setExperiments] = useState("");
   const [activeTab, setActiveTab] = useState<TeachingStage>(TeachingStage.Import);
   const [scripts, setScripts] = useState<ScriptState>(INITIAL_SCRIPTS);
+  const [history, setHistory] = useState<ScriptHistory>(INITIAL_HISTORY);
   const [reviewResults, setReviewResults] = useState<ReviewState>({});
   const [modificationPrompt, setModificationPrompt] = useState("");
   const [newComment, setNewComment] = useState("");
+  const [showHistoryDropdown, setShowHistoryDropdown] = useState(false);
   
   // Loading States
   const [isGenerating, setIsGenerating] = useState(false);
   const [isReviewing, setIsReviewing] = useState(false);
   const [isModifying, setIsModifying] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+
+  // Helper to add history
+  const addToHistory = (stage: TeachingStage, content: string, type: 'generate' | 'modify') => {
+    const newItem: HistoryItem = {
+      id: Date.now().toString(),
+      content,
+      timestamp: Date.now(),
+      type
+    };
+    setHistory(prev => ({
+      ...prev,
+      [stage]: [newItem, ...prev[stage]].slice(0, 10) // Keep last 10
+    }));
+  };
 
   // Handlers
   const handleScriptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -33,7 +52,12 @@ const App: React.FC = () => {
     try {
       // Pass the current scripts state to include previous stages context
       const generated = await generateScriptForStage(activeTab, courseFlow, experiments, scripts);
+      
+      // Add to history before updating state
+      addToHistory(activeTab, generated, 'generate');
+
       setScripts((prev) => ({ ...prev, [activeTab]: generated }));
+      
       // Preserve manual comments
       const currentManuals = reviewResults[activeTab]?.issues.filter(i => i.isManual) || [];
       setReviewResults(prev => ({...prev, [activeTab]: { issues: currentManuals }}));
@@ -101,6 +125,7 @@ const App: React.FC = () => {
       if (modified.includes("ERROR_WRONG_STAGE")) {
         alert(`❌ 错误：您的修改指令似乎指向了其他环节。\n\n当前正在编辑【${activeTab}】。\n如需修改其他环节，请先点击顶部标签页切换到对应页面。`);
       } else {
+        addToHistory(activeTab, modified, 'modify');
         setScripts((prev) => ({ ...prev, [activeTab]: modified }));
         setModificationPrompt("");
       }
@@ -111,8 +136,93 @@ const App: React.FC = () => {
     }
   };
 
+  const handleRestoreHistory = (item: HistoryItem) => {
+    if (window.confirm("确定要恢复此历史版本吗？当前编辑内容将丢失。")) {
+      setScripts(prev => ({ ...prev, [activeTab]: item.content }));
+      setShowHistoryDropdown(false);
+    }
+  };
+
+  const handleExportPDF = () => {
+    setIsExporting(true);
+    // Create a temporary container
+    const container = document.createElement('div');
+    container.style.padding = '40px';
+    container.style.fontFamily = 'Arial, sans-serif';
+    container.style.color = '#333';
+
+    // Header
+    const title = document.createElement('h1');
+    title.innerText = "飞飞博士人工智能特色课脚本";
+    title.style.textAlign = 'center';
+    title.style.fontSize = '24px';
+    title.style.marginBottom = '20px';
+    container.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.innerHTML = `
+      <p><strong>课程大纲：</strong> ${courseFlow || '未填写'}</p>
+      <p><strong>实验教具：</strong> ${experiments || '无'}</p>
+      <hr style="margin: 20px 0; border: 1px solid #eee;" />
+    `;
+    container.appendChild(meta);
+
+    // Loop through stages
+    STAGES.forEach(stage => {
+      const scriptContent = scripts[stage];
+      if (scriptContent && scriptContent.trim()) {
+        const section = document.createElement('div');
+        section.style.marginBottom = '30px';
+        section.style.pageBreakInside = 'avoid';
+        
+        const h2 = document.createElement('h2');
+        h2.innerText = `【${stage}】`;
+        h2.style.fontSize = '18px';
+        h2.style.backgroundColor = '#f3f4f6';
+        h2.style.padding = '10px';
+        h2.style.borderRadius = '8px';
+        h2.style.borderLeft = '4px solid #000';
+        section.appendChild(h2);
+
+        const contentPre = document.createElement('pre');
+        contentPre.innerText = scriptContent;
+        contentPre.style.whiteSpace = 'pre-wrap';
+        contentPre.style.fontSize = '12px';
+        contentPre.style.lineHeight = '1.6';
+        contentPre.style.fontFamily = 'monospace';
+        contentPre.style.marginTop = '10px';
+        section.appendChild(contentPre);
+
+        container.appendChild(section);
+      }
+    });
+
+    // Options for html2pdf
+    const opt = {
+      margin:       10,
+      filename:     `Script_${new Date().toISOString().slice(0,10)}.pdf`,
+      image:        { type: 'jpeg', quality: 0.98 },
+      html2canvas:  { scale: 2 },
+      jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
+
+    // Generate
+    html2pdf().set(opt).from(container).save().then(() => {
+      setIsExporting(false);
+    }).catch((err: any) => {
+      console.error(err);
+      alert("PDF生成失败");
+      setIsExporting(false);
+    });
+  };
+
+  const formatTime = (timestamp: number) => {
+    return new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  };
+
   // Derived state
   const currentReview = reviewResults[activeTab];
+  const currentHistory = history[activeTab];
 
   return (
     <div className="flex h-screen bg-white text-gray-900 font-sans overflow-hidden">
@@ -149,7 +259,7 @@ const App: React.FC = () => {
       {/* --- Middle Column: Tabs & Editor --- */}
       <div className="w-1/2 flex flex-col relative bg-white border-r border-gray-100">
         {/* Header: Tabs + Generate Button */}
-        <div className="px-6 pt-6 pb-2 flex justify-between items-center">
+        <div className="px-6 pt-6 pb-2 flex justify-between items-center z-20 relative">
           {/* Tabs - Pill Style */}
           <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
             {STAGES.map((stage) => (
@@ -167,24 +277,80 @@ const App: React.FC = () => {
             ))}
           </div>
 
-          {/* Action Button */}
-          <button
-            onClick={handleGenerateCurrent}
-            disabled={isGenerating}
-            className="flex items-center gap-2 px-6 py-2 bg-black text-white text-xs font-bold rounded-full hover:bg-gray-800 transition-all disabled:opacity-50 shadow-xl shadow-gray-200 ml-4 flex-shrink-0"
-          >
-            {isGenerating ? <Spinner className="w-3 h-3 text-white" /> : "生成脚本"}
-          </button>
+          <div className="flex items-center gap-3 ml-4 flex-shrink-0">
+             {/* History Button */}
+            <div className="relative">
+              <button
+                onClick={() => setShowHistoryDropdown(!showHistoryDropdown)}
+                className={`p-2.5 rounded-full transition-all ${
+                  showHistoryDropdown 
+                  ? "bg-gray-100 text-black" 
+                  : "text-gray-400 hover:bg-gray-50 hover:text-gray-600"
+                }`}
+                title="历史版本"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 3v5h5"/>
+                  <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/>
+                </svg>
+              </button>
+
+              {/* History Dropdown */}
+              {showHistoryDropdown && (
+                <div className="absolute right-0 top-12 w-72 bg-white rounded-2xl shadow-xl border border-gray-100 p-2 z-50">
+                  <div className="px-3 py-2 text-[10px] font-bold uppercase text-gray-400 border-b border-gray-50 flex justify-between">
+                    <span>{activeTab} 历史记录</span>
+                    <span className="font-normal">{currentHistory.length} versions</span>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto custom-scrollbar mt-1">
+                    {currentHistory.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-gray-400">暂无生成记录</div>
+                    ) : (
+                      currentHistory.map((item) => (
+                        <div 
+                          key={item.id} 
+                          onClick={() => handleRestoreHistory(item)}
+                          className="p-3 hover:bg-gray-50 rounded-xl cursor-pointer group transition-colors"
+                        >
+                          <div className="flex justify-between items-center mb-1">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+                              item.type === 'generate' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'
+                            }`}>
+                              {item.type === 'generate' ? 'AI生成' : 'AI修改'}
+                            </span>
+                            <span className="text-[10px] text-gray-400 font-mono">{formatTime(item.timestamp)}</span>
+                          </div>
+                          <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">
+                            {item.content.substring(0, 80)}...
+                          </p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Generate Button */}
+            <button
+              onClick={handleGenerateCurrent}
+              disabled={isGenerating}
+              className="flex items-center gap-2 px-6 py-2 bg-black text-white text-xs font-bold rounded-full hover:bg-gray-800 transition-all disabled:opacity-50 shadow-xl shadow-gray-200"
+            >
+              {isGenerating ? <Spinner className="w-3 h-3 text-white" /> : "生成脚本"}
+            </button>
+          </div>
         </div>
 
         {/* Editor Area */}
-        <div className="flex-1 relative px-6 py-4">
+        <div className="flex-1 relative px-6 py-4 z-10">
             <textarea
                 className="w-full h-full p-8 bg-gray-50 rounded-[2rem] text-sm leading-relaxed resize-none focus:outline-none font-mono text-gray-800 custom-scrollbar"
                 value={scripts[activeTab]}
                 onChange={handleScriptChange}
                 placeholder={PLACEHOLDERS[activeTab]}
                 spellCheck={false}
+                onClick={() => setShowHistoryDropdown(false)} // Close dropdown on edit
             />
         </div>
 
@@ -215,13 +381,23 @@ const App: React.FC = () => {
       <div className="w-1/4 min-w-[280px] flex flex-col bg-white">
         <div className="p-8 pb-4 flex justify-between items-center">
           <h2 className="font-bold text-lg text-black">标准审核</h2>
-          <button
-            onClick={handleReviewCurrent}
-            disabled={isReviewing || !scripts[activeTab]}
-            className="text-xs font-bold bg-gray-100 hover:bg-gray-200 text-black px-5 py-2 rounded-full transition-colors disabled:opacity-30"
-          >
-            {isReviewing ? "审核中..." : "立即审核"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleExportPDF}
+              disabled={isExporting}
+              className="text-xs font-bold bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 px-3 py-2 rounded-full transition-colors disabled:opacity-30"
+              title="导出全部脚本为PDF"
+            >
+              {isExporting ? <Spinner className="w-3 h-3" /> : "📄 导出"}
+            </button>
+            <button
+              onClick={handleReviewCurrent}
+              disabled={isReviewing || !scripts[activeTab]}
+              className="text-xs font-bold bg-gray-100 hover:bg-gray-200 text-black px-5 py-2 rounded-full transition-colors disabled:opacity-30"
+            >
+              {isReviewing ? "审核中..." : "立即审核"}
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-8 pb-8 custom-scrollbar">
